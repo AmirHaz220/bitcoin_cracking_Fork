@@ -16,14 +16,17 @@
   (a)[7] ^= (b)[7];
 
 
-#define DEBUG_ARRAY(name, array, len)                                          \
-  do {                                                                         \
-    for (uint i = 0; i < (len); i++) {                                         \
-      printf("%s[%d] = 0x%016lxUL\n",name,i, (array)[i]);                                       \
-    }                                                                          \
-                                                                  \
-  } while (0)
 
+#ifdef DEBUG_PRINTF
+#define DEBUG_ARRAY(name, array, len) \
+  do { \
+    for (uint i = 0; i < (len); i++) { \
+      printf("%s[%d] = 0x%016lxUL\n", name, i, (array)[i]); \
+    } \
+  } while (0)
+#else
+#define DEBUG_ARRAY(name, array, len)
+#endif
 uint strlen(uchar *s) {
   uint l;
   for (l = 0; s[l] != '\0'; l++) {

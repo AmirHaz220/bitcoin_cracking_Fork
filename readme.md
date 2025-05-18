@@ -135,3 +135,13 @@ Feel free to contribute, suggest improvements, or open an issue if you have any 
 	email[@]brunodasilva.com
     2024
 
+
+## Usage
+
+Run the script with your anchor and unknown word files:
+
+```bash
+python3 main.py --anchors anchors.json --unknowns unknowns.json --passphrase 1713
+```
+
+`anchors.json` contains fixed or guessed words with their indices. `unknowns.json` maps remaining positions to candidate word lists. The passphrase is optional and defaults to an empty string.

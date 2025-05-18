@@ -1,173 +1,149 @@
+import argparse
+import json
+import os
 import time
+from itertools import product
+
 import numpy as np
 import pyopencl as cl
 from mnemonic import Mnemonic
-from concurrent.futures import ThreadPoolExecutor, as_completed
-
-import time
-import hashlib
-import hmac
-seed_hex = "db4c5960c73d510cfd34c8ccbab2058b893e2a6c2af88140982e4f1d028fc6a56ba3e48738fca465cd5014a41169558ea8360ca1d8336fc6e5b946e3e0fdf012"
-
-# Converter a seed para bytes
-seed_bytes = bytes.fromhex(seed_hex)
-
-# Chave "Bitcoin seed" como bytes
-key = b"Bitcoin seed"
-
-# Calcular HMAC-SHA512
-hmac_result = hmac.new(key, seed_bytes, hashlib.sha512).digest()
-
-# Separar em Master Private Key e Chain Code
-master_private_key = hmac_result[:32].hex()
-chain_code = hmac_result[32:].hex()
-
-# Mostrar os resultados
-print(f"Em Python pegando o HMAC-SHA512 Result em HEX: {hmac_result.hex()}")
-
-
-# Converter 
-import os
-os.environ['PYOPENCL_COMPILER_OUTPUT'] = '1'
-import random
-
-BIP32_E8_ID = 1;
-BIP39_EIGHT_LEN = ['abstract', 'accident', 'acoustic', 'announce', 'artefact', 'attitude', 'bachelor', 'broccoli', 'business', 'category', 'champion', 'cinnamon', 'congress', 'consider', 'convince', 'cupboard', 'daughter', 'december', 'decorate', 'decrease', 'describe', 'dinosaur', 'disagree', 'discover', 'disorder', 'distance', 'document', 'electric', 'elephant', 'elevator', 'envelope', 'evidence', 'exchange', 'exercise', 'favorite', 'february', 'festival', 'frequent', 'hedgehog', 'hospital', 'identify', 'increase', 'indicate', 'industry', 'innocent', 'interest', 'kangaroo', 'language', 'marriage', 'material', 'mechanic', 'midnight', 'mosquito', 'mountain', 'multiply', 'mushroom', 'negative', 'ordinary', 'original', 'physical', 'position', 'possible', 'practice', 'priority', 'property', 'purchase', 'question', 'remember', 'resemble', 'resource', 'response', 'scissors', 'scorpion', 'security', 'sentence', 'shoulder', 'solution', 'squirrel', 'strategy', 'struggle', 'surprise', 'surround', 'together', 'tomorrow', 'tortoise', 'transfer', 'umbrella', 'universe']
 
 mnemo = Mnemonic("english")
-
-FIXED_WORDS = f"abandon abandon abandon abandon abandon abandon abandon {BIP39_EIGHT_LEN[BIP32_E8_ID]} ? ? ? ?".replace('?', "abandon").split()
-print(FIXED_WORDS)
-DESTINY_WALLET = "bc1q9nfphml9vzfs6qxyyfqdve5vrqw62dp26qhalx"
-
 
 repeater_workers = 1
 local_workers = 256
 global_workers = 512
-
-global_workers -= global_workers%local_workers
-tw = (global_workers,)
-tt = (local_workers,)
-
-
-print(f"Rodando OpenCL com {global_workers} GPU THREADS e {repeater_workers * global_workers}")
+global_workers -= global_workers % local_workers
+TW = (global_workers,)
+TT = (local_workers,)
 
 
-    
-def run_kernel(program, queue):
-    context = program.context
-    kernel = program.verify
-    elements = global_workers * 12000
-    bytes = elements * 8
-    inicio = time.perf_counter()
-    indices = words_to_indices(FIXED_WORDS)
-    print(indices)
-    high, low = mnemonic_to_uint64_pair(indices)
-    print(high,low)
-    high_buf = cl.Buffer(context, cl.mem_flags.READ_ONLY | cl.mem_flags.COPY_HOST_PTR, hostbuf=np.array([high], dtype=np.uint64))
-    low_buf = cl.Buffer(context, cl.mem_flags.READ_ONLY | cl.mem_flags.COPY_HOST_PTR, hostbuf=np.array([low], dtype=np.uint64))
-    p = cl.Buffer(context, cl.mem_flags.READ_ONLY | cl.mem_flags.COPY_HOST_PTR, hostbuf=np.array([1], dtype=np.uint32))
-
- 
-    output_buf = cl.Buffer(context, cl.mem_flags.WRITE_ONLY, bytes)
-    kernel.set_args(p, high_buf, low_buf, output_buf)
-    
-    event = cl.enqueue_nd_range_kernel(queue, kernel, tw, tt)
-    
-    event.wait()
-    start_time = event.profile.start
-    end_time = event.profile.end
-    execution_time = (end_time - start_time) * 1e-6  # Em milissegundos
-    print(f"Tempo de execução do kernel: {execution_time:.3f} ms")
-    resultado = (global_workers) / (time.perf_counter() - inicio)
-    result = np.empty(elements, dtype=np.uint64) 
-    cl.enqueue_copy(queue, result, output_buf).wait()
-
-    print(f"Tempo de execução: {resultado:.2f} por seguno")
+def build_message_words(passphrase: str):
+    salt = b"mnemonic" + passphrase.encode()
+    msg = salt + b"\x00\x00\x00\x01"
+    total_len = 128 + len(msg)
+    pad_len = (112 - total_len % 128) % 128
+    padding = b"\x80" + b"\x00" * (pad_len - 1)
+    bit_len = (total_len) * 8
+    length_field = bit_len.to_bytes(16, "big")
+    final = msg + padding + length_field
+    return [int.from_bytes(final[i : i + 8], "big") for i in range(0, len(final), 8)]
 
 
-def carregar_wallets():
-    memoria = {}
-    print("Carregando endereços Bitcoin na Memória")
-    with open("wallets.tsv", "r") as arquivo:
-        for linha in arquivo:
-            linha = linha.strip()
-            if linha:
-                try:
-                    addr, saldo = linha.split()
-                    memoria[addr] = float(saldo)
-                except ValueError:
-                    continue
+def load_candidates(anchors_path: str, unknowns_path: str):
+    slots = [None] * 24
+    if anchors_path:
+        with open(anchors_path, "r") as f:
+            data = json.load(f)
+        for item in data.get("anchors", []):
+            idx = item["index"] - 1
+            if "word" in item:
+                slots[idx] = [item["word"]]
+            elif "guess" in item:
+                slots[idx] = item["guess"]
+    if unknowns_path and os.path.exists(unknowns_path):
+        with open(unknowns_path, "r") as f:
+            data = json.load(f)
+        for k, v in data.items():
+            slots[int(k) - 1] = v
+    for i in range(24):
+        if slots[i] is None:
+            slots[i] = mnemo.wordlist
+    return slots
 
-    addr_busca = "0x1234abcd"
-    if addr_busca in memoria:
-        print(f"Saldo de {addr_busca}: {memoria[addr_busca]}")
-    else:
-        print(f"Endereço {addr_busca} não encontrado.")
 
-
-def build_program(context, *filenames):
-    source_code = ""
-    for filename in filenames:
-        source_code += load_program_source(filename) + "\n\n\n"
-    return cl.Program(context, source_code).build()
+def candidate_mnemonics(slots):
+    for combo in product(*slots):
+        yield list(combo)
 
 
 def words_to_indices(words):
-    indices = []
-    for word in words:
-        if word in mnemo.wordlist:
-            indices.append(mnemo.wordlist.index(word))
-    return np.array(indices, dtype=np.int32)
+    return np.array([mnemo.wordlist.index(w) for w in words], dtype=np.int32)
 
 
-def mnemonic_to_uint64_pair(indices): 
-    binary_string = ''.join(f"{index:011b}" for index in indices)[:-4]
-    binary_string = binary_string.ljust(128, '0')
+def mnemonic_to_uint64_pair(indices):
+    binary_string = "".join(f"{i:011b}" for i in indices)[:-4]
+    binary_string = binary_string.ljust(128, "0")
     high = int(binary_string[:64], 2)
     low = int(binary_string[64:], 2)
     return high, low
-  
- 
-def uint64_pair_to_mnemonic(high, low):
-    binary_string = f"{high:064b}{low:064b}"
-    indices = [int(binary_string[i:i+11], 2)
-               for i in range(0, len(binary_string), 11)]
-    words = [mnemo.wordlist[index]
-             for index in indices if index < len(mnemo.wordlist)]
-    seed = ' '.join(words)
-    return seed
+
+
+def run_kernel(program, queue, words, msg_words):
+    context = program.context
+    kernel = program.verify
+    elements = global_workers * 12000
+    buf_size = elements * 8
+
+    indices = words_to_indices(words)
+    high, low = mnemonic_to_uint64_pair(indices)
+
+    high_buf = cl.Buffer(context, cl.mem_flags.READ_ONLY | cl.mem_flags.COPY_HOST_PTR, hostbuf=np.array([high], dtype=np.uint64))
+    low_buf = cl.Buffer(context, cl.mem_flags.READ_ONLY | cl.mem_flags.COPY_HOST_PTR, hostbuf=np.array([low], dtype=np.uint64))
+    msg_buf = cl.Buffer(context, cl.mem_flags.READ_ONLY | cl.mem_flags.COPY_HOST_PTR, hostbuf=np.array(msg_words, dtype=np.uint64))
+    p_buf = cl.Buffer(context, cl.mem_flags.READ_ONLY | cl.mem_flags.COPY_HOST_PTR, hostbuf=np.array([1], dtype=np.uint32))
+    output_buf = cl.Buffer(context, cl.mem_flags.WRITE_ONLY, buf_size)
+
+    start = time.perf_counter()
+    kernel.set_args(p_buf, high_buf, low_buf, msg_buf, output_buf)
+    event = cl.enqueue_nd_range_kernel(queue, kernel, TW, TT)
+    event.wait()
+    exec_time = (event.profile.end - event.profile.start) * 1e-6
+    total = global_workers / (time.perf_counter() - start)
+
+    result = np.empty(elements, dtype=np.uint64)
+    cl.enqueue_copy(queue, result, output_buf).wait()
+
+    print(f"Kernel {exec_time:.3f} ms, {total:.2f} ops/s")
+
+
+def build_program(context, *filenames):
+    src = "".join(open(f).read() + "\n\n" for f in filenames)
+    return cl.Program(context, src).build()
+
+
+def load_wallets(path="wallets.tsv"):
+    if not os.path.exists(path):
+        print("wallets.tsv not found, skipping wallet loading")
+        return {}
+    memoria = {}
+    with open(path, "r") as arquivo:
+        for linha in arquivo:
+            linha = linha.strip()
+            if not linha:
+                continue
+            try:
+                addr, saldo = linha.split()
+                memoria[addr] = float(saldo)
+            except ValueError:
+                continue
+    return memoria
 
 
 def main():
+    parser = argparse.ArgumentParser(description="BIP-39 brute force demo")
+    parser.add_argument("--anchors", help="anchors JSON file", default=None)
+    parser.add_argument("--unknowns", help="unknowns JSON file", default=None)
+    parser.add_argument("--passphrase", help="bip39 passphrase", default="")
+    args = parser.parse_args()
+
+    slots = load_candidates(args.anchors, args.unknowns)
+    msg_words = build_message_words(args.passphrase)
+
     try:
         platforms = cl.get_platforms()
         devices = platforms[0].get_devices()
         device = devices[0]
-
         context = cl.Context([device])
         queue = cl.CommandQueue(context, properties=cl.command_queue_properties.PROFILING_ENABLE)
-
-        program = build_program(context,"./kernel/main.cl")
-        if not (device.queue_properties & cl.command_queue_properties.PROFILING_ENABLE):
-            print("O dispositivo não suporta perfilamento!")
-        else:
-            print("Perfilamento habilitado.")
-        run_kernel(program, queue)
-
-        print("Kernel executado com sucesso.")
+        program = build_program(context, "./kernel/main.cl")
+        for words in candidate_mnemonics(slots):
+            run_kernel(program, queue, words, msg_words)
+            break  # demo runs first combination only
     except Exception as e:
-        print(f"Erro ao compilar o programa OpenCL 1: {e}")
-    return
-
-
-def load_program_source(filename):
-    with open(filename, 'r') as f:
-        content = f.read()
-    return content
-
+        print(f"Erro ao executar kernel: {e}")
+        return
 
 
 if __name__ == "__main__":
-    #carregar_wallets()
     main()
