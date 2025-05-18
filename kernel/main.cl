@@ -5,7 +5,8 @@
 #include "kernel/sha512.cl"
 
 __kernel void verify(__global uint *mnemonicWords, __global ulong *H,
-                     __global ulong *L, __global ulong *output) {
+                     __global ulong *L, __global ulong *msg,
+                     __global ulong *output) {
   int gid = get_global_id(0);
   if (gid > 0)
     return;
@@ -34,18 +35,18 @@ __kernel void verify(__global uint *mnemonicWords, __global ulong *H,
     outer_data[lid] = mnemonicLong[lid] ^ OPAD;
   }
 
-  outer_data[16] = 6655295901103053916;
-  inner_data[16] = 7885351518267664739;
-  inner_data[17] = 6442450944;
-  outer_data[24] = 9223372036854775808;
-  outer_data[31] = 1536;
-  inner_data[31] = 1120;
+  for (int i = 0; i < 16; i++) {
+    inner_data[16 + i] = msg[i];
+    outer_data[16 + i] = msg[i];
+  }
 
   pbkdf2_hmac_sha512_long(inner_data, outer_data, pbkdLong);
   hmac_sha512_bitcoin_seed(pbkdLong, hmacSeedOutput);
 
+#ifdef DEBUG_PRINTF
   printf("Seed: \"%s\"\n"
          "PBKDF2: \"%016lx%016lx%016lx%016lx%016lx%016lx%016lx%016lx\"\n"
          "HMAC  : \"%016lx%016lx%016lx%016lx%016lx%016lx%016lx%016lx\"\n",
          mnemonicString, SHOW_ARR(pbkdLong), SHOW_ARR(hmacSeedOutput));
+#endif
 }
